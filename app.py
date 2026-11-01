@@ -6,7 +6,7 @@ import unicodedata
 from io import BytesIO
 
 # Configuración de página
-st.set_page_config(page_title="Auditoría de Calidad - Uvas", page_icon="🍇", layout="wide")
+st.set_page_config(page_title="Verificación Inconsistencias Cartilla Pt-Uva", page_icon="🍇", layout="wide")
 
 # Estilos CSS corporativos
 st.markdown("""
@@ -17,7 +17,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 class="titulo-principal">🍇 Sistema de Auditoría y Control de Calidad - Uvas</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="titulo-principal">🍇 Verificación de Inconsistencias Cartilla PT-Empaque Uva - Uvas</h1>', unsafe_allow_html=True)
 st.markdown('<p class="subtitulo">Valida rangos lógicos, límite exacto de la muestra y revisa evidencias fotográficas de manera interactiva.</p>', unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"])
