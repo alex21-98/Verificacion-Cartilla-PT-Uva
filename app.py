@@ -1,206 +1,158 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import openpyxl
 from io import BytesIO
 
-st.set_page_config(
-    page_title="Validador y Auditor de Calidad - Uvas",
-    page_icon="🍇",
-    layout="wide"
-)
+st.set_page_config(page_title="Auditoría de Calidad - Uvas", page_icon="🍇", layout="wide")
 
-st.title("🍇 Sistema Avanzado de Auditoría y Control de Calidad - Uvas")
-st.markdown("""
-Esta aplicación web procesa tu reporte de Excel aplicando las reglas de negocio de **pudrición y bayas rajadas**, valida que la suma de racimos por rangos no supere el total de la muestra, extrae los hipervínculos reales de las fotos en S3 y genera un reporte detallado en múltiples hojas.
-""")
+st.title("🍇 Sistema de Auditoría y Control de Calidad - Uvas")
+st.markdown("Valida rangos de pudrición/rajaduras, límite de muestra total y verifica fotos de evidencia (S3).")
 
-uploaded_file = st.file_uploader("Sube tu archivo Excel de evaluaciones (.xlsx)", type=["xlsx"])
+uploaded_file = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
-    @st.cache_data
-    def load_data(file):
-        df = pd.read_excel(file, sheet_name=0)
-        return df
-
-    df = load_data(uploaded_file).copy()
+    df = pd.read_excel(uploaded_file, sheet_name=0).copy()
     
-    # Cargar también el libro con openpyxl para extraer los hipervínculos reales de las fotos
-    wb_orig = openpyxl.load_workbook(uploaded_file)
+    wb_orig = openpyxl.load_workbook(uploaded_file, data_only=False)
     ws_orig = wb_orig.active
-    headers_orig = [cell.value for cell in ws_orig[1]]
+    headers_orig = [str(cell.value).strip() if cell.value else "" for cell in ws_orig[1]]
 
-    st.sidebar.header("Opciones de Control")
-    filtro_estado = st.sidebar.radio(
-        "Filtrar registros en tabla:",
-        ["Todos los registros", "Solo registros con errores lógicos", "Solo registros conformes (OK)"]
-    )
+    st.sidebar.header("Opciones")
+    filtro = st.sidebar.radio("Mostrar en tabla:", ["Todos los registros", "Solo Errores", "Solo Correctos (OK)"])
 
-    # Búsqueda inteligente de columnas clave
-    def find_col(keyword_list):
+    # Función estricta para encontrar columnas sin confundirse
+    def find_col_exact(keywords, exclude=None):
+        if exclude is None: exclude = []
         for col in df.columns:
-            if all(k in col.upper() for k in keyword_list):
+            col_up = col.upper()
+            if all(k in col_up for k in keywords) and all(e not in col_up for e in exclude):
                 return col
         return None
 
-    col_r_total = find_col(['N° RACIMOS', 'CLAMSHELL']) or find_col(['RACIMOS'])
-    
-    col_r13 = find_col(['RAC', '1-3'])
-    col_p13 = find_col(['PUDRICIÓN', '1-3']) or find_col(['PUDRICION', '1-3'])
-    col_br13 = find_col(['RAJADURAS', '1-3']) or find_col(['RAJAD', '1-3'])
+    # Aislar la columna del TOTAL de racimos de la muestra (excluyendo las de defectos)
+    col_muestra_total = find_col_exact(['RAC'], exclude=['PUDRIC', 'RAJAD', '1-3', '4-5', '6', '%', 'DEFECTO']) or \
+                        find_col_exact(['CLAM'], exclude=['PUDRIC', 'RAJAD', '1-3', '4-5', '6', '%', 'DEFECTO'])
 
-    col_r45 = find_col(['RAC', '4-5'])
-    col_p45 = find_col(['PUDRICIÓN', '4-5']) or find_col(['PUDRICION', '4-5'])
-    col_br45 = find_col(['RAJADURAS', '4-5']) or find_col(['RAJAD', '4-5'])
+    # Búsqueda EXACTA de columnas por rango
+    # [1-3]
+    col_r13 = find_col_exact(['RAC./CLAMSHELL', '(1-3']) or find_col_exact(['RAC', '1-3', 'PUDRIC'], exclude=['ENCONTRADAS'])
+    col_p13 = find_col_exact(['PUDRICIÓN', 'ENCONTRADAS', '1-3']) or find_col_exact(['PUDRICION', 'ENCONTRADAS', '1-3'])
+    col_br13 = find_col_exact(['RAJADURAS', 'ENCONTRADAS', '1-3'])
 
-    col_r6 = find_col(['RAC', '6'])
-    col_p6 = find_col(['PUDRICIÓN', '6']) or find_col(['PUDRICION', '6'])
-    col_br6 = find_col(['RAJADURAS', '6']) or find_col(['RAJAD', '6'])
+    # [4-5]
+    col_r45 = find_col_exact(['RAC./CLAMSHELL', '(4-5']) or find_col_exact(['RAC', '4-5', 'PUDRIC'], exclude=['ENCONTRADAS'])
+    col_p45 = find_col_exact(['PUDRICIÓN', 'ENCONTRADAS', '4-5']) or find_col_exact(['PUDRICION', 'ENCONTRADAS', '4-5'])
+    col_br45 = find_col_exact(['RAJADURAS', 'ENCONTRADAS', '4-5'])
+
+    # [6+]
+    col_r6 = find_col_exact(['RAC./CLAMSHELL', '(6']) or find_col_exact(['RAC', '6', 'PUDRIC'], exclude=['ENCONTRADAS'])
+    col_p6 = find_col_exact(['PUDRICIÓN', 'ENCONTRADAS', '6']) or find_col_exact(['PUDRICION', 'ENCONTRADAS', '6'])
+    col_br6 = find_col_exact(['RAJADURAS', 'ENCONTRADAS', '6'])
 
     def safe_float(val):
-        try:
-            return float(val) if pd.notna(val) else 0.0
-        except:
-            return 0.0
+        try: return float(val) if pd.notna(val) else 0.0
+        except: return 0.0
 
-    # Auditoría estricta basada en tus reglas
-    auditoria_resultados = []
-    detalle_errores = []
+    resultados = []
+    log_errores = []
 
     for idx, row in df.iterrows():
-        errores_fila = []
+        errores = []
         
-        r13 = safe_float(row.get(col_r13, 0)) if col_r13 else 0.0
-        p13 = safe_float(row.get(col_p13, 0)) if col_p13 else 0.0
-        br13 = safe_float(row.get(col_br13, 0)) if col_br13 else 0.0
-        tot13 = p13 + br13
+        r13 = safe_float(row.get(col_r13, 0)); p13 = safe_float(row.get(col_p13, 0)); br13 = safe_float(row.get(col_br13, 0))
+        r45 = safe_float(row.get(col_r45, 0)); p45 = safe_float(row.get(col_p45, 0)); br45 = safe_float(row.get(col_br45, 0))
+        r6  = safe_float(row.get(col_r6, 0));  p6  = safe_float(row.get(col_p6, 0));  br6  = safe_float(row.get(col_br6, 0))
+        
+        t13 = p13 + br13
+        t45 = p45 + br45
+        t6  = p6 + br6
 
-        r45 = safe_float(row.get(col_r45, 0)) if col_r45 else 0.0
-        p45 = safe_float(row.get(col_p45, 0)) if col_p45 else 0.0
-        br45 = safe_float(row.get(col_br45, 0)) if col_br45 else 0.0
-        tot45 = p45 + br45
-
-        r6 = safe_float(row.get(col_r6, 0)) if col_r6 else 0.0
-        p6 = safe_float(row.get(col_p6, 0)) if col_p6 else 0.0
-        br6 = safe_float(row.get(col_br6, 0)) if col_br6 else 0.0
-        tot6 = p6 + br6
-
-        # 1. Regla de suma de racimos entre rangos (No puede exceder el total de racimos evaluados si existe la columna)
+        # REGLA ORO: Límite de Muestra
         suma_racimos_afectados = r13 + r45 + r6
-        if col_r_total:
-            total_muestra = safe_float(row.get(col_r_total, 0))
+        if col_muestra_total:
+            total_muestra = safe_float(row.get(col_muestra_total, 0))
             if total_muestra > 0 and suma_racimos_afectados > total_muestra:
-                errores_fila.append(f"[Exceso de Racimos]: La suma de racimos afectados ({int(suma_racimos_afectados)}) supera el total evaluado en la muestra ({int(total_muestra)}).")
+                errores.append(f"[LÍMITE]: Suma de racimos afectados ({int(suma_racimos_afectados)}) supera la muestra total ({int(total_muestra)})")
 
-        # 2. Validación Rango [1-3]
+        # REGLA [1-3]
         if r13 > 0:
-            if not (1 * r13 <= tot13 <= 3 * r13):
-                errores_fila.append(f"[Rango 1-3]: {int(r13)} racimos exigen de {int(1*r13)} a {int(3*r13)} bayas, pero suman {int(tot13)}.")
-        elif r13 == 0 and tot13 > 0:
-            errores_fila.append(f"[Rango 1-3]: Hay {int(tot13)} bayas registradas pero 0 racimos indicados.")
+            if not (1 * r13 <= t13 <= 3 * r13):
+                errores.append(f"[1-3]: {int(r13)} rac exigen entre {int(1*r13)} y {int(3*r13)} bayas, hay {int(t13)}")
+        elif t13 > 0:
+            errores.append(f"[1-3]: Hay {int(t13)} bayas pero 0 racimos indicados")
 
-        # 3. Validación Rango [4-5]
+        # REGLA [4-5]
         if r45 > 0:
-            if not (4 * r45 <= tot45 <= 5 * r45):
-                errores_fila.append(f"[Rango 4-5]: {int(r45)} racimos exigen de {int(4*r45)} a {int(5*r45)} bayas, pero suman {int(tot45)}.")
-        elif r45 == 0 and tot45 > 0:
-            errores_fila.append(f"[Rango 4-5]: Hay {int(tot45)} bayas registradas pero 0 racimos indicados.")
+            if not (4 * r45 <= t45 <= 5 * r45):
+                errores.append(f"[4-5]: {int(r45)} rac exigen entre {int(4*r45)} y {int(5*r45)} bayas, hay {int(t45)}")
+        elif t45 > 0:
+            errores.append(f"[4-5]: Hay {int(t45)} bayas pero 0 racimos indicados")
 
-        # 4. Validación Rango [6+] (Mínimo N * 6 bayas)
+        # REGLA [6+]
         if r6 > 0:
-            if tot6 < 6 * r6:
-                errores_fila.append(f"[Rango 6+]: {int(r6)} racimos exigen mínimo {int(6*r6)} bayas, pero suman {int(tot6)}.")
-        elif r6 == 0 and tot6 > 0:
-            errores_fila.append(f"[Rango 6+]: Hay {int(tot6)} bayas registradas pero 0 racimos indicados.")
+            if t6 < 6 * r6:
+                errores.append(f"[6+]: {int(r6)} rac exigen mínimo {int(6*r6)} bayas, hay {int(t6)}")
+        elif t6 > 0:
+            errores.append(f"[6+]: Hay {int(t6)} bayas pero 0 racimos indicados")
 
-        if errores_fila:
-            msg = " | ".join(errores_fila)
-            auditoria_resultados.append("ERROR LÓGICO: " + msg)
-            detalle_errores.append({
-                "Fila Excel": idx + 2,
-                "ID Registro": row.get('Id', idx),
-                "Motivo del Error": msg
-            })
+        if errores:
+            msg = " | ".join(errores)
+            resultados.append("ERROR: " + msg)
+            log_errores.append({"Fila Excel": idx + 2, "ID Registro": row.get('Id', f"Fila {idx+2}"), "Error": msg})
         else:
-            auditoria_resultados.append("OK")
+            resultados.append("OK")
 
-    df['AUDITORIA_ESTADO'] = auditoria_resultados
-    df_errores_log = pd.DataFrame(detalle_errores)
+    df['ESTADO_AUDITORIA'] = resultados
+    df_errores = pd.DataFrame(log_errores)
 
-    # Métricas superiores
-    st.subheader("📊 Resumen General de Auditoría")
-    total_filas = len(df)
-    total_errores = len(df_errores_log)
-    
+    # UI STREAMLIT
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Registros Evaluados", total_filas)
-    c2.metric("Registros Conformes (OK)", total_filas - total_errores)
-    c3.metric("Registros con Errores Lógicos", total_errores, delta_color="inverse")
+    c1.metric("Total Registros", len(df))
+    c2.metric("Correctos (OK)", len(df) - len(df_errores))
+    c3.metric("Con Errores", len(df_errores), delta_color="inverse")
 
-    if filtro_estado == "Solo registros con errores lógicos":
-        df_display = df[df['AUDITORIA_ESTADO'] != 'OK']
-    elif filtro_estado == "Solo registros conformes (OK)":
-        df_display = df[df['AUDITORIA_ESTADO'] == 'OK']
-    else:
-        df_display = df
+    if filtro == "Solo Errores": df_mostrar = df[df['ESTADO_AUDITORIA'] != 'OK']
+    elif filtro == "Solo Correctos (OK)": df_mostrar = df[df['ESTADO_AUDITORIA'] == 'OK']
+    else: df_mostrar = df
 
     st.markdown("---")
-    
-    col_izq, col_der = st.columns([1.3, 0.7])
+    col_izq, col_der = st.columns([1.5, 1])
 
     with col_izq:
-        st.subheader("📋 Tabla de Registros Evaluados")
-        st.dataframe(df_display, height=450)
+        st.subheader("📋 Base Evaluada")
+        st.dataframe(df_mostrar, height=500)
 
-        # Descarga de Excel con múltiples hojas
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='Base Evaluada', index=False)
-            if not df_errores_log.empty:
-                df_errores_log.to_excel(writer, sheet_name='Reporte de Errores', index=False)
-        processed_data = output.getvalue()
-
-        st.download_button(
-            label="📥 Descargar Excel con Reporte de Errores y Auditoría",
-            data=processed_data,
-            file_name="Reporte_Auditoria_Calidad_Uvas.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            if not df_errores.empty:
+                df_errores.to_excel(writer, sheet_name='Reporte de Errores', index=False)
+        
+        st.download_button(label="📥 Descargar Excel de Auditoría", data=output.getvalue(), file_name="Auditoria_Uvas.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with col_der:
-        st.subheader("🖼️ Visor y Verificador de Fotos (S3)")
-        st.markdown("Selecciona la **Fila de Excel** para extraer el enlace real de la foto y corroborar visualmente el conteo:")
+        st.subheader("🖼️ Verificación Visual")
+        fila_sel = st.selectbox("Elige la fila Excel a validar:", df.index + 2)
+        estado = df.loc[fila_sel - 2, 'ESTADO_AUDITORIA']
+        if estado == "OK": st.success(f"Fila {fila_sel}: OK ✅")
+        else: st.error(f"Fila {fila_sel}: {estado} ⚠️")
 
-        fila_seleccionada = st.selectbox("Elige la Fila de Excel a revisar:", df.index + 2)
-        
-        row_evaluada = df.loc[fila_seleccionada - 2]
-        estado_fila = row_evaluada['AUDITORIA_ESTADO']
-        
-        if estado_fila == "OK":
-            st.success(f"Fila {fila_seleccionada}: Estado **OK** ✅")
-        else:
-            st.error(f"Fila {fila_seleccionada}: **{estado_fila}** ⚠️")
+        foto_cols = [c for c in df.columns if 'EVIDENCIA' in c.upper() or 'FOTO' in c.upper()]
+        hay_foto = False
+        for c_name in foto_cols:
+            if c_name in headers_orig:
+                c_idx = headers_orig.index(c_name) + 1
+                cell = ws_orig.cell(row=fila_sel, column=c_idx)
+                
+                url = None
+                if cell.hyperlink and cell.hyperlink.target: url = cell.hyperlink.target
+                elif isinstance(cell.value, str) and "http" in cell.value: url = cell.value
 
-        # Buscar columnas de fotos o evidencia
-        foto_cols = [c for c in df.columns if 'FOTO' in c.upper() or 'TRAZABILIDAD' in c.upper() or 'EVIDENCIA' in c.upper()]
+                if url:
+                    hay_foto = True
+                    st.markdown(f"**{c_name}**")
+                    st.markdown(f"[🔗 Ver Imagen]({url})", unsafe_allow_html=True)
+                    try: st.image(url, use_container_width=True)
+                    except: st.warning("Haz clic en el enlace para abrir la evidencia.")
         
-        if foto_cols:
-            for col_name in foto_cols:
-                if col_name in headers_orig:
-                    c_idx = headers_orig.index(col_name) + 1
-                    cell_obj = ws_orig.cell(row=fila_seleccionada, column=c_idx)
-                    
-                    # Extraer hipervínculo real de openpyxl o texto URL
-                    url = cell_obj.hyperlink.target if cell_obj.hyperlink else (cell_obj.value if isinstance(cell_obj.value, str) and cell_obj.value.startswith('http') else None)
-                    
-                    if url:
-                        st.markdown(f"**{col_name}**")
-                        st.markdown(f"[🔗 Abrir Fotografía en el Navegador]({url})", unsafe_allow_html=True)
-                        try:
-                            st.image(url, caption=f"Evidencia Fila {fila_seleccionada}", use_container_width=True)
-                        except Exception:
-                            st.warning("No se pudo previsualizar la imagen directamente por seguridad de red, pero haz clic en el enlace de arriba para verla.")
-                    else:
-                        st.info(f"Sin enlace de foto en {col_name} para esta fila.")
-        else:
-            st.info("No se detectaron columnas de fotos en este archivo.")
+        if not hay_foto: st.info("Sin evidencia fotográfica.")
