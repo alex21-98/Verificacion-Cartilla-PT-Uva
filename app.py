@@ -7,7 +7,7 @@ from io import BytesIO
 st.set_page_config(page_title="Auditoría de Calidad - Uvas", page_icon="🍇", layout="wide")
 
 st.title("🍇 Sistema de Auditoría y Control de Calidad - Uvas")
-st.markdown("Valida rangos lógicos, límite de muestra y **haz clic en cualquier fila de la tabla** para visualizar instantáneamente sus fotos de evidencia (S3).")
+st.markdown("Valida rangos lógicos, límite de muestra y revisa las fotos de evidencia (S3).")
 
 uploaded_file = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"])
 
@@ -20,7 +20,7 @@ if uploaded_file is not None:
     ws_orig = wb_orig.active
     headers_orig = [str(cell.value).strip() if cell.value else "" for cell in ws_orig[1]]
 
-    st.sidebar.header("Opciones")
+    st.sidebar.header("Opciones de Control")
     filtro = st.sidebar.radio("Mostrar en tabla:", ["Todos los registros", "Solo Errores", "Solo Correctos (OK)"])
 
     def find_col_exact(keywords, exclude=None):
@@ -103,19 +103,11 @@ if uploaded_file is not None:
     else: df_mostrar = df
 
     st.markdown("---")
-    col_izq, col_der = st.columns([1.6, 1])
+    col_izq, col_der = st.columns([1.5, 1])
 
     with col_izq:
-        st.subheader("📋 Base Evaluada (Haz clic en una fila)")
-        
-        # Dataframe interactivo
-        evento = st.dataframe(
-            df_mostrar, 
-            height=500, 
-            use_container_width=True,
-            selection_mode="single_row",
-            on_select="rerun"
-        )
+        st.subheader("📋 Base Evaluada")
+        st.dataframe(df_mostrar, height=450, use_container_width=True)
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -128,19 +120,21 @@ if uploaded_file is not None:
     with col_der:
         st.subheader("🖼️ Verificación Visual S3")
         
-        filas_seleccionadas = evento.selection.rows
-        
-        if filas_seleccionadas:
-            # Obtener el índice real de la fila en el dataframe original
-            indice_real = df_mostrar.index[filas_seleccionadas[0]]
-            fila_sel = indice_real + 2
+        # Selector desplegable de fila (100% compatible con todas las versiones de Streamlit)
+        filas_disponibles = [idx + 2 for idx in df_mostrar.index]
+        if filas_disponibles:
+            fila_sel = st.selectbox("Selecciona Fila de Excel para ver Foto S3:", filas_disponibles)
             
+            indice_real = fila_sel - 2
             estado = df.loc[indice_real, 'ESTADO_AUDITORIA']
-            if estado == "OK": st.success(f"Fila Excel {fila_sel}: OK ✅")
-            else: st.error(f"Fila Excel {fila_sel}: {estado} ⚠️")
+            
+            if estado == "OK": 
+                st.success(f"Fila Excel {fila_sel}: OK ✅")
+            else: 
+                st.error(f"Fila Excel {fila_sel}: {estado} ⚠️")
 
-            # Buscar todas las columnas que digan EVIDENCIA o FOTO
-            foto_cols = [c for c in df.columns if 'EVIDENCIA' in c.upper() or 'FOTO' in c.upper()]
+            # Extracción completa de enlaces de fotos S3
+            foto_cols = [c for c in df.columns if 'EVIDENCIA' in c.upper() or 'FOTO' in c.upper() or 'TRAZABILIDAD' in c.upper()]
             hay_foto = False
             
             for c_name in foto_cols:
@@ -149,30 +143,27 @@ if uploaded_file is not None:
                     cell = ws_orig.cell(row=fila_sel, column=c_idx)
                     
                     url = None
-                    # 1. Enlace nativo
+                    # 1. Objeto Hyperlink de openpyxl
                     if cell.hyperlink and cell.hyperlink.target:
                         url = cell.hyperlink.target
-                    # 2. Fórmula =HIPERVINCULO("url", "texto") o texto directo
+                    # 2. Fórmula =HIPERVINCULO("https://...") o texto con URL
                     elif cell.value:
                         val_str = str(cell.value)
-                        if val_str.startswith("http"):
-                            url = val_str
-                        else:
-                            # Extraer URL dentro de la fórmula con Regex
-                            match = re.search(r'"(https?://[^"]+)"', val_str)
+                        if "http" in val_str:
+                            match = re.search(r'(https?://[^\s"]+)', val_str)
                             if match:
-                                url = match.group(1)
+                                url = match.group(1).rstrip('")')
 
                     if url:
                         hay_foto = True
                         st.markdown(f"**{c_name}**")
                         st.markdown(f"[🔗 Abrir Imagen Original]({url})", unsafe_allow_html=True)
-                        try: 
-                            st.image(url, use_container_width=True)
-                        except: 
-                            st.warning("Haz clic en el enlace para abrir la evidencia (restricción del servidor).")
+                        try:
+                            st.image(url, caption=f"Fila {fila_sel} - {c_name}", use_container_width=True)
+                        except Exception:
+                            st.warning("No se pudo cargar la vista previa por políticas del bucket S3, pero puedes abrir el enlace de arriba.")
             
             if not hay_foto: 
                 st.info("Sin evidencia fotográfica adjunta en esta fila.")
         else:
-            st.info("👆 Selecciona una fila en la tabla de la izquierda para ver su evidencia fotográfica aquí.")
+            st.info("No hay filas para mostrar según el filtro seleccionado.")
