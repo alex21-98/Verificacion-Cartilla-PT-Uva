@@ -17,38 +17,32 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<h1 class="titulo-principal">🍇 Sistema de Auditoría y Control de Calidad - Uvas</h1>', unsafe_allow_html=True)
-st.markdown('<p class="subtitulo">Valida rangos lógicos, límite exacto de la muestra y revisa evidencias fotográficas interactivas.</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitulo">Valida rangos lógicos, límite exacto de la muestra y revisa evidencias fotográficas de manera interactiva.</p>', unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
     df = pd.read_excel(uploaded_file, sheet_name=0).copy()
     
+    # Carga con openpyxl para extracción de fotos S3
     wb_orig = openpyxl.load_workbook(uploaded_file, data_only=False)
     ws_orig = wb_orig.active
     headers_orig = [str(cell.value).strip() if cell.value else "" for cell in ws_orig[1]]
 
-    # --- BARRA LATERAL (CONFIGURACIÓN Y FILTROS) ---
-    st.sidebar.markdown("### ⚙️ Configuración de Reglas")
-    
-    # Detección automática de la columna de muestra exacta aportada
+    # --- BARRA LATERAL (Solo Filtros) ---
+    st.sidebar.markdown("### 🔍 Filtro de Visualización")
+    filtro = st.sidebar.radio("Mostrar en la tabla:", ["Todos los registros", "Solo Errores (Para corregir)", "Solo Correctos (OK)"])
+
+    # --- BÚSQUEDA ESTRICTA DE COLUMNAS ---
     def normalizar_nombre(c):
         return str(c).upper().replace(" ", "-").replace("_", "-")
 
-    posibles_totales = [c for c in df.columns if 'DATOS-DE-EVALUACION-N-RACIMOS-CLAMSHELL' in normalizar_nombre(c) or 'DATOS-DE-EVALUACION' in normalizar_nombre(c) or 'MUESTRA' in normalizar_nombre(c)]
-    indice_por_defecto = df.columns.get_loc(posibles_totales[0]) if posibles_totales else 0
-    
-    # Selector EXPLÍCITO para la regla de total de racimos evaluados
-    col_muestra_total = st.sidebar.selectbox(
-        "Columna 'Total de Racimos Evaluados':", 
-        options=df.columns, 
-        index=indice_por_defecto,
-        help="El sistema usará esta columna para validar que la suma de racimos afectados no supere la muestra total evaluada."
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔍 Filtro de Tabla")
-    filtro = st.sidebar.radio("Mostrar:", ["Todos los registros", "Solo Errores", "Solo Correctos (OK)"])
+    # Detección fija de la columna de muestra total aportada
+    col_muestra_total = None
+    for col in df.columns:
+        if 'DATOS-DE-EVALUACION-N-RACIMOS-CLAMSHELL' in normalizar_nombre(col):
+            col_muestra_total = col
+            break
 
     def find_col_exact(keywords, exclude=None):
         if exclude is None: exclude = []
@@ -58,7 +52,7 @@ if uploaded_file is not None:
                 return col
         return None
 
-    # Identificación estricta de columnas de pudrición/rajaduras
+    # Identificación de columnas de pudrición/rajaduras por rango
     col_r13 = find_col_exact(['RAC./CLAMSHELL', '(1-3']) or find_col_exact(['RAC', '1-3', 'PUDRIC'], exclude=['ENCONTRADAS'])
     col_p13 = find_col_exact(['PUDRICIÓN', 'ENCONTRADAS', '1-3']) or find_col_exact(['PUDRICION', 'ENCONTRADAS', '1-3'])
     col_br13 = find_col_exact(['RAJADURAS', 'ENCONTRADAS', '1-3'])
@@ -78,7 +72,7 @@ if uploaded_file is not None:
     resultados = []
     log_errores = []
 
-    # Bucle Lógico y Matemático
+    # --- BUCLE DE VALIDACIÓN LÓGICA ---
     for idx, row in df.iterrows():
         errores = []
         r13 = safe_float(row.get(col_r13, 0)); p13 = safe_float(row.get(col_p13, 0)); br13 = safe_float(row.get(col_br13, 0))
@@ -87,23 +81,26 @@ if uploaded_file is not None:
         
         t13 = p13 + br13; t45 = p45 + br45; t6 = p6 + br6
         
-        # 1. REGLA ESTRICTA DE LÍMITE TOTAL CON LA COLUMNA ASIGNADA
-        suma_racimos_afectados = r13 + r45 + r6
-        tot_evaluados = safe_float(row.get(col_muestra_total, 0))
-        if tot_evaluados > 0 and suma_racimos_afectados > tot_evaluados:
-            errores.append(f"[EXCESO TOTAL]: Hay {int(suma_racimos_afectados)} racimos afectados en total, pero la muestra evaluada es solo de {int(tot_evaluados)}")
+        # 1. Regla Límite Total Evaluado (Fija sobre datos-de-evaluacion-n-racimos-clamshell)
+        if col_muestra_total:
+            suma_racimos_afectados = r13 + r45 + r6
+            tot_evaluados = safe_float(row.get(col_muestra_total, 0))
+            if tot_evaluados > 0 and suma_racimos_afectados > tot_evaluados:
+                errores.append(f"[EXCESO TOTAL]: Hay {int(suma_racimos_afectados)} racimos afectados en total, pero la muestra evaluada es solo de {int(tot_evaluados)}")
 
-        # 2. Reglas de consistencia por rangos
+        # 2. Reglas de Rango [1-3]
         if r13 > 0:
-            if not (1 * r13 <= t13 <= 3 * r13): errores.append(f"[1-3]: {int(r13)} racimos exigen {int(1*r13)} a {int(3*r13)} bayas, hay {int(t13)}")
+            if not (1 * r13 <= t13 <= 3 * r13): errores.append(f"[1-3]: {int(r13)} rac exigen {int(1*r13)} a {int(3*r13)} bayas, hay {int(t13)}")
         elif t13 > 0: errores.append(f"[1-3]: Hay {int(t13)} bayas pero 0 racimos indicados")
 
+        # 3. Reglas de Rango [4-5]
         if r45 > 0:
-            if not (4 * r45 <= t45 <= 5 * r45): errores.append(f"[4-5]: {int(r45)} racimos exigen {int(4*r45)} a {int(5*r45)} bayas, hay {int(t45)}")
+            if not (4 * r45 <= t45 <= 5 * r45): errores.append(f"[4-5]: {int(r45)} rac exigen {int(4*r45)} a {int(5*r45)} bayas, hay {int(t45)}")
         elif t45 > 0: errores.append(f"[4-5]: Hay {int(t45)} bayas pero 0 racimos indicados")
 
+        # 4. Reglas de Rango [6+]
         if r6 > 0:
-            if t6 < 6 * r6: errores.append(f"[6+]: {int(r6)} racimos exigen mín {int(6*r6)} bayas, hay {int(t6)}")
+            if t6 < 6 * r6: errores.append(f"[6+]: {int(r6)} rac exigen mín {int(6*r6)} bayas, hay {int(t6)}")
         elif t6 > 0: errores.append(f"[6+]: Hay {int(t6)} bayas pero 0 racimos indicados")
 
         if errores:
@@ -114,22 +111,23 @@ if uploaded_file is not None:
             resultados.append("OK")
 
     df['ESTADO_AUDITORIA'] = resultados
+    
+    # Mover columna de estado al inicio para visibilidad inmediata
     columnas_reordenadas = ['ESTADO_AUDITORIA'] + [col for col in df.columns if col != 'ESTADO_AUDITORIA']
     df = df[columnas_reordenadas]
     df_errores = pd.DataFrame(log_errores)
 
-    # Panel de Métricas
+    # --- INTERFAZ DE USUARIO ---
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Registros", len(df))
-    c2.metric("Correctos (OK)", len(df) - len(df_errores))
-    c3.metric("Con Errores", len(df_errores), delta_color="inverse")
+    c1.metric("Total Registros Evaluados", len(df))
+    c2.metric("Registros Correctos (OK)", len(df) - len(df_errores))
+    c3.metric("Con Errores Lógicos", len(df_errores), delta_color="inverse")
     st.markdown("---")
 
-    if filtro == "Solo Errores": df_mostrar = df[df['ESTADO_AUDITORIA'] != 'OK']
+    if filtro == "Solo Errores (Para corregir)": df_mostrar = df[df['ESTADO_AUDITORIA'] != 'OK']
     elif filtro == "Solo Correctos (OK)": df_mostrar = df[df['ESTADO_AUDITORIA'] == 'OK']
     else: df_mostrar = df
 
-    # Layout de la Interfaz
     col_izq, col_der = st.columns([1.8, 1.2])
 
     with col_izq:
