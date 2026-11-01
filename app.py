@@ -7,7 +7,7 @@ from io import BytesIO
 st.set_page_config(page_title="Auditoría de Calidad - Uvas", page_icon="🍇", layout="wide")
 
 st.title("🍇 Sistema de Auditoría y Control de Calidad - Uvas")
-st.markdown("Valida rangos lógicos, límite de muestra y revisa las fotos de evidencia (S3).")
+st.markdown("Valida rangos lógicos, límite de muestra y **haz clic en cualquier fila de la tabla** para visualizar instantáneamente sus evidencias fotográficas (S3).")
 
 uploaded_file = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"])
 
@@ -103,11 +103,19 @@ if uploaded_file is not None:
     else: df_mostrar = df
 
     st.markdown("---")
-    col_izq, col_der = st.columns([1.5, 1])
+    col_izq, col_der = st.columns([1.6, 1])
 
     with col_izq:
-        st.subheader("📋 Base Evaluada")
-        st.dataframe(df_mostrar, height=450, use_container_width=True)
+        st.subheader("📋 Base Evaluada (Haz clic en una fila)")
+        
+        # Dataframe interactivo automático (Corregido 'single-row' para evitar el ValueError)
+        evento = st.dataframe(
+            df_mostrar, 
+            height=500, 
+            use_container_width=True,
+            selection_mode="single-row",
+            on_select="rerun"
+        )
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -118,23 +126,24 @@ if uploaded_file is not None:
         st.download_button("📥 Descargar Excel de Auditoría", data=output.getvalue(), file_name="Auditoria_Uvas.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with col_der:
-        st.subheader("🖼️ Verificación Visual S3")
+        st.subheader("🖼️ Evidencia Visual S3")
         
-        # Selector desplegable de fila (100% compatible con todas las versiones de Streamlit)
-        filas_disponibles = [idx + 2 for idx in df_mostrar.index]
-        if filas_disponibles:
-            fila_sel = st.selectbox("Selecciona Fila de Excel para ver Foto S3:", filas_disponibles)
+        # Rescatar la fila seleccionada del evento 'on_select'
+        filas_seleccionadas = evento.selection.rows
+        
+        if filas_seleccionadas:
+            # Obtener el índice real de la fila en el dataframe filtrado
+            indice_real = df_mostrar.index[filas_seleccionadas[0]]
+            fila_sel = indice_real + 2
             
-            indice_real = fila_sel - 2
             estado = df.loc[indice_real, 'ESTADO_AUDITORIA']
-            
             if estado == "OK": 
                 st.success(f"Fila Excel {fila_sel}: OK ✅")
             else: 
                 st.error(f"Fila Excel {fila_sel}: {estado} ⚠️")
 
-            # Extracción completa de enlaces de fotos S3
-            foto_cols = [c for c in df.columns if 'EVIDENCIA' in c.upper() or 'FOTO' in c.upper() or 'TRAZABILIDAD' in c.upper()]
+            # Buscar estrictamente las columnas que digan EVIDENCIA EXTRA
+            foto_cols = [c for c in df.columns if 'EVIDENCIA EXTRA' in c.upper()]
             hay_foto = False
             
             for c_name in foto_cols:
@@ -143,10 +152,10 @@ if uploaded_file is not None:
                     cell = ws_orig.cell(row=fila_sel, column=c_idx)
                     
                     url = None
-                    # 1. Objeto Hyperlink de openpyxl
+                    # 1. Enlace nativo incrustado en la celda
                     if cell.hyperlink and cell.hyperlink.target:
                         url = cell.hyperlink.target
-                    # 2. Fórmula =HIPERVINCULO("https://...") o texto con URL
+                    # 2. Fórmula tipo =HIPERVINCULO o texto plano
                     elif cell.value:
                         val_str = str(cell.value)
                         if "http" in val_str:
@@ -158,12 +167,12 @@ if uploaded_file is not None:
                         hay_foto = True
                         st.markdown(f"**{c_name}**")
                         st.markdown(f"[🔗 Abrir Imagen Original]({url})", unsafe_allow_html=True)
-                        try:
-                            st.image(url, caption=f"Fila {fila_sel} - {c_name}", use_container_width=True)
-                        except Exception:
-                            st.warning("No se pudo cargar la vista previa por políticas del bucket S3, pero puedes abrir el enlace de arriba.")
+                        try: 
+                            st.image(url, use_container_width=True)
+                        except Exception: 
+                            st.warning("Haz clic en el enlace superior para abrir la evidencia (restricción del servidor S3).")
             
             if not hay_foto: 
-                st.info("Sin evidencia fotográfica adjunta en esta fila.")
+                st.info("No se registraron fotos de evidencia extra en esta fila.")
         else:
-            st.info("No hay filas para mostrar según el filtro seleccionado.")
+            st.info("👆 Selecciona una fila en la tabla de la izquierda para ver su evidencia fotográfica aquí en automático.")
