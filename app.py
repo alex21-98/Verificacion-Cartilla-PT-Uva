@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import openpyxl
 import re
+import unicodedata
 from io import BytesIO
 
 # Configuración de página
@@ -33,14 +34,18 @@ if uploaded_file is not None:
     st.sidebar.markdown("### 🔍 Filtro de Visualización")
     filtro = st.sidebar.radio("Mostrar en la tabla:", ["Todos los registros", "Solo Errores (Para corregir)", "Solo Correctos (OK)"])
 
-    # --- BÚSQUEDA ESTRICTA DE COLUMNAS ---
-    def normalizar_nombre(c):
-        return str(c).upper().replace(" ", "-").replace("_", "-")
+    # --- BÚSQUEDA ESTRICTA Y ROBUSTA DE COLUMNAS ---
+    
+    # Función para limpiar tildes, espacios y símbolos (ej. N°, :, /)
+    def clean_col_name(c):
+        c = str(c).upper()
+        c = ''.join(char for char in unicodedata.normalize('NFD', c) if unicodedata.category(char) != 'Mn')
+        return re.sub(r'[^A-Z0-9]', '', c)
 
-    # Detección fija de la columna de muestra total aportada
+    # Detección de la columna de muestra total (Soporta ambos formatos de BD o Web)
     col_muestra_total = None
     for col in df.columns:
-        if 'DATOS-DE-EVALUACION-N-RACIMOS-CLAMSHELL' in normalizar_nombre(col):
+        if 'DATOSDEEVALUACIONNRACIMOSCLAMSHELL' in clean_col_name(col):
             col_muestra_total = col
             break
 
@@ -81,7 +86,7 @@ if uploaded_file is not None:
         
         t13 = p13 + br13; t45 = p45 + br45; t6 = p6 + br6
         
-        # 1. Regla Límite Total Evaluado (Fija sobre datos-de-evaluacion-n-racimos-clamshell)
+        # 1. Regla Límite Total Evaluado (Detecta la columna correcta siempre)
         if col_muestra_total:
             suma_racimos_afectados = r13 + r45 + r6
             tot_evaluados = safe_float(row.get(col_muestra_total, 0))
